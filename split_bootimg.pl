@@ -34,6 +34,10 @@
 
 use strict;
 use warnings;
+use strict;
+use File::Path;
+use File::Basename;
+use Config::Tiny
 
 # Turn on print flushing
 $|++;
@@ -43,6 +47,7 @@ $|++;
 
 my $SCRIPT = __FILE__;
 my $IMAGE_FN = undef;
+my $PARAMS_FN = undef;
 
 # Constants (from bootimg.h)
 use constant BOOT_MAGIC => 'ANDROID!';
@@ -88,6 +93,7 @@ my $o = int(($SECOND_SIZE + $PAGE_SIZE - 1) / $PAGE_SIZE);
 my $k_offset = $PAGE_SIZE;
 my $r_offset = $k_offset + ($n * $PAGE_SIZE);
 my $s_offset = $r_offset + ($m * $PAGE_SIZE);
+my ($k_addr, $r_addr, $s_addr, $t_addr);
 
 (my $base = $IMAGE_FN) =~ s/.*\/(.*)$/$1/;
 my $k_file = $base . "-kernel";
@@ -102,6 +108,9 @@ print " complete.\n";
 # The ramdisk is always there
 print "Writing $r_file ...";
 &dump_file($IMAGE_FN, $r_file, $r_offset, $RAMDISK_SIZE);
+print " complete.\n";
+print "Unpacking $r_file ...";
+&unpack_ramdisk($r_file, $base . "-ramdisk");
 print " complete.\n";
 
 # The Second stage bootloader is optional
@@ -164,8 +173,9 @@ sub parse_header {
     read(INF, $buf, UNSIGNED_SIZE * 2);
     my ($s_size, $s_addr) = unpack("VV", $buf);
 
-    # Ignore tags_addr
+    # Read tags_addr
     read(INF, $buf, UNSIGNED_SIZE);
+    $t_addr = unpack("V", $buf);
 
     # get the page size (assume little-endian)
     read(INF, $buf, UNSIGNED_SIZE);
@@ -180,7 +190,8 @@ sub parse_header {
 
     # Read the command line
     read(INF, $buf, BOOT_ARGS_SIZE);
-    my $cmdline = $buf;
+    my $num_zeros = $buf =~ tr/\000//;
+    my $cmdline = substr $buf, 0, (BOOT_ARGS_SIZE - $num_zeros);
 
     # Ignore the id
     read(INF, $buf, UNSIGNED_SIZE * 8);
@@ -191,8 +202,12 @@ sub parse_header {
     # Print important values
     printf "Page size: %d (0x%08x)\n", $p_size, $p_size;
     printf "Kernel size: %d (0x%08x)\n", $k_size, $k_size;
+    printf "Kernel addr: 0x%08x\n", $k_addr;
     printf "Ramdisk size: %d (0x%08x)\n", $r_size, $r_size;
+    printf "Ramdisk addr: 0x%08x\n", $r_addr;
     printf "Second size: %d (0x%08x)\n", $s_size, $s_size;
+    printf "Second addr: 0x%08x\n", $s_addr;
+    printf "Tags addr: 0x%08x\n", $t_addr;
     printf "Board name: $name\n";
     printf "Command line: $cmdline\n";
 
@@ -201,6 +216,20 @@ sub parse_header {
     $KERNEL_SIZE = $k_size;
     $RAMDISK_SIZE = $r_size;
     $SECOND_SIZE = $s_size;
+
+    # Dump values to file
+    if (defined $PARAMS_FN) {
+	printf "Writing parameters config file $PARAMS_FN ... ";
+        my $config = Config::Tiny->new();
+	$config->{_}->{pagesize} = $p_size;
+	$config->{_}->{kernel_offset} = sprintf("0x%08x", $k_addr);
+	$config->{_}->{ramdisk_offset} = sprintf("0x%08x", $r_addr);
+	$config->{_}->{second_offset} = sprintf("0x%08x", $s_addr);
+	$config->{_}->{tags_offset} = sprintf("0x%08x", $t_addr);
+	$config->{_}->{cmdline} = "\'$cmdline\'";
+	$config->write($PARAMS_FN);
+	printf "complete.\n";
+    }
 }
 
 sub dump_file {
@@ -221,14 +250,27 @@ sub dump_file {
     close OUTF;
 }
 
+sub unpack_ramdisk {
+    my ($filename, $dirname) = @_;
+    
+    if ( -e $dirname ) {
+	rmtree $dirname or die "Unable to remove directory $dirname, $!\n";
+    }
+    mkdir $dirname or die "Unable to create directory $dirname, $!\n";
+    chdir $dirname or die "Unable to change to directory $dirname, $!\n";
+    
+    system("zcat ../$filename | cpio -id --quiet");
+}
+
 ######################################################################
 ## Configuration Subroutines
 
 sub parse_cmdline {
-    unless ($#ARGV == 0) {
+    if ($#ARGV < 0) {
 	die "Usage: $SCRIPT boot.img\n";
     }
     $IMAGE_FN = $ARGV[0];
+	$PARAMS_FN = basename $ARGV[0] . "-params.conf";
 }
 
 
